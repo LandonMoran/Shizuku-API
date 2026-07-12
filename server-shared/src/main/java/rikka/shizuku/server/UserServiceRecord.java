@@ -40,6 +40,12 @@ public abstract class UserServiceRecord {
     public boolean daemon;
     public boolean starting;
     public boolean pendingDestroy;
+    // The spawn action for this record, stored so it can be re-run if the first
+    // spawn fails while a client is still waiting (see UserServiceManager
+    // #dropRecordIfNotAttachedLocked). spawnAttempts bounds the retries so a
+    // permanently-failing spawn cannot loop forever.
+    public Runnable spawnRunnable;
+    public int spawnAttempts;
 
     public UserServiceRecord(int versionCode, boolean daemon) {
         this.versionCode = versionCode;
