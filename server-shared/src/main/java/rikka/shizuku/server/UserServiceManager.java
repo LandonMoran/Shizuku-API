@@ -168,6 +168,9 @@ public abstract class UserServiceManager {
                     newRecord.setStartingTimeout(DateUtils.SECOND_IN_MILLIS * 30);
 
                     Runnable runnable = () -> startUserService(newRecord, key, newRecord.token, packageName, className, processNameSuffix, uid, use32Bits, debug);
+                    // Keep the spawn action so dropRecordIfNotAttachedLocked can re-run
+                    // it if this first spawn fails while a rebind is already waiting.
+                    newRecord.spawnRunnable = runnable;
                     executor.execute(runnable);
                     return 0;
                 }
@@ -268,11 +271,32 @@ public abstract class UserServiceManager {
         // Guard on service == null under the lock so we never tear down a process
         // that managed to attach in the meantime.
         synchronized (this) {
-            if (record.service == null) {
-                removeUserServiceLocked(record);
+            if (record.service != null) {
+                // Attached in the meantime - never tear down a live process.
+                return;
             }
+            // If a rebind re-registered a waiter on this record while the spawn was
+            // failing, removing it now would strand that client: it reused this
+            // record (so nothing re-spawns for it) and would get no connected(), no
+            // died(), and no new process - just a silent hang. Re-run the spawn a
+            // bounded number of times so the waiting client still gets a process.
+            if (record.callbacks.getRegisteredCallbackCount() > 0
+                    && record.spawnRunnable != null
+                    && userServiceRecords.containsValue(record)
+                    && record.spawnAttempts < MAX_SPAWN_RETRIES) {
+                record.spawnAttempts++;
+                LOGGER.w("[repro] spawn for record %s failed but %d client(s) waiting; respawning (attempt %d/%d) instead of dropping",
+                        record.token, record.callbacks.getRegisteredCallbackCount(), record.spawnAttempts, MAX_SPAWN_RETRIES);
+                executor.execute(record.spawnRunnable);
+                return;
+            }
+            removeUserServiceLocked(record);
         }
     }
+
+    // Bounds respawn attempts in dropRecordIfNotAttachedLocked so a permanently
+    // failing spawn cannot loop forever; on exhaustion the record is dropped as before.
+    private static final int MAX_SPAWN_RETRIES = 3;
 
     public abstract String getUserServiceStartCmd(
             UserServiceRecord record, String key, String token, String packageName,
